@@ -1,0 +1,626 @@
+{
+    "sim_name": "",
+    "num_nodes": 100,
+    "num_edges": 50,
+    "node_positions": {
+        "0": {
+            "x": 0,
+            "y": 0
+        },
+        "1": {
+            "x": 125,
+            "y": 12.5
+        },
+        "2": {
+            "x": 250,
+            "y": 0
+        },
+        "3": {
+            "x": 375,
+            "y": 12.5
+        },
+        "4": {
+            "x": 500,
+            "y": 0
+        },
+        "5": {
+            "x": 625,
+            "y": 12.5
+        },
+        "6": {
+            "x": 750,
+            "y": 0
+        },
+        "7": {
+            "x": 875,
+            "y": 12.5
+        },
+        "8": {
+            "x": 1000,
+            "y": 0
+        },
+        "9": {
+            "x": 1125,
+            "y": 12.5
+        },
+        "10": {
+            "x": 12.5,
+            "y": 125
+        },
+        "11": {
+            "x": 137.5,
+            "y": 137.5
+        },
+        "12": {
+            "x": 262.5,
+            "y": 125
+        },
+        "13": {
+            "x": 387.5,
+            "y": 137.5
+        },
+        "14": {
+            "x": 512.5,
+            "y": 125
+        },
+        "15": {
+            "x": 637.5,
+            "y": 137.5
+        },
+        "16": {
+            "x": 762.5,
+            "y": 125
+        },
+        "17": {
+            "x": 887.5,
+            "y": 137.5
+        },
+        "18": {
+            "x": 1012.5,
+            "y": 125
+        },
+        "19": {
+            "x": 1137.5,
+            "y": 137.5
+        },
+        "20": {
+            "x": 0,
+            "y": 250
+        },
+        "21": {
+            "x": 125,
+            "y": 262.5
+        },
+        "22": {
+            "x": 250,
+            "y": 250
+        },
+        "23": {
+            "x": 375,
+            "y": 262.5
+        },
+        "24": {
+            "x": 500,
+            "y": 250
+        },
+        "25": {
+            "x": 625,
+            "y": 262.5
+        },
+        "26": {
+            "x": 750,
+            "y": 250
+        },
+        "27": {
+            "x": 875,
+            "y": 262.5
+        },
+        "28": {
+            "x": 1000,
+            "y": 250
+        },
+        "29": {
+            "x": 1125,
+            "y": 262.5
+        },
+        "30": {
+            "x": 12.5,
+            "y": 375
+        },
+        "31": {
+            "x": 137.5,
+            "y": 387.5
+        },
+        "32": {
+            "x": 262.5,
+            "y": 375
+        },
+        "33": {
+            "x": 387.5,
+            "y": 387.5
+        },
+        "34": {
+            "x": 512.5,
+            "y": 375
+        },
+        "35": {
+            "x": 637.5,
+            "y": 387.5
+        },
+        "36": {
+            "x": 762.5,
+            "y": 375
+        },
+        "37": {
+            "x": 887.5,
+            "y": 387.5
+        },
+        "38": {
+            "x": 1012.5,
+            "y": 375
+        },
+        "39": {
+            "x": 1137.5,
+            "y": 387.5
+        },
+        "40": {
+            "x": 0,
+            "y": 500
+        },
+        "41": {
+            "x": 125,
+            "y": 512.5
+        },
+        "42": {
+            "x": 250,
+            "y": 500
+        },
+        "43": {
+            "x": 375,
+            "y": 512.5
+        },
+        "44": {
+            "x": 500,
+            "y": 500
+        },
+        "45": {
+            "x": 625,
+            "y": 512.5
+        },
+        "46": {
+            "x": 750,
+            "y": 500
+        },
+        "47": {
+            "x": 875,
+            "y": 512.5
+        },
+        "48": {
+            "x": 1000,
+            "y": 500
+        },
+        "49": {
+            "x": 1125,
+            "y": 512.5
+        },
+        "50": {
+            "x": 12.5,
+            "y": 625
+        },
+        "51": {
+            "x": 137.5,
+            "y": 637.5
+        },
+        "52": {
+            "x": 262.5,
+            "y": 625
+        },
+        "53": {
+            "x": 387.5,
+            "y": 637.5
+        },
+        "54": {
+            "x": 512.5,
+            "y": 625
+        },
+        "55": {
+            "x": 637.5,
+            "y": 637.5
+        },
+        "56": {
+            "x": 762.5,
+            "y": 625
+        },
+        "57": {
+            "x": 887.5,
+            "y": 637.5
+        },
+        "58": {
+            "x": 1012.5,
+            "y": 625
+        },
+        "59": {
+            "x": 1137.5,
+            "y": 637.5
+        },
+        "60": {
+            "x": 0,
+            "y": 750
+        },
+        "61": {
+            "x": 125,
+            "y": 762.5
+        },
+        "62": {
+            "x": 250,
+            "y": 750
+        },
+        "63": {
+            "x": 375,
+            "y": 762.5
+        },
+        "64": {
+            "x": 500,
+            "y": 750
+        },
+        "65": {
+            "x": 625,
+            "y": 762.5
+        },
+        "66": {
+            "x": 750,
+            "y": 750
+        },
+        "67": {
+            "x": 875,
+            "y": 762.5
+        },
+        "68": {
+            "x": 1000,
+            "y": 750
+        },
+        "69": {
+            "x": 1125,
+            "y": 762.5
+        },
+        "70": {
+            "x": 12.5,
+            "y": 875
+        },
+        "71": {
+            "x": 137.5,
+            "y": 887.5
+        },
+        "72": {
+            "x": 262.5,
+            "y": 875
+        },
+        "73": {
+            "x": 387.5,
+            "y": 887.5
+        },
+        "74": {
+            "x": 512.5,
+            "y": 875
+        },
+        "75": {
+            "x": 637.5,
+            "y": 887.5
+        },
+        "76": {
+            "x": 762.5,
+            "y": 875
+        },
+        "77": {
+            "x": 887.5,
+            "y": 887.5
+        },
+        "78": {
+            "x": 1012.5,
+            "y": 875
+        },
+        "79": {
+            "x": 1137.5,
+            "y": 887.5
+        },
+        "80": {
+            "x": 0,
+            "y": 1000
+        },
+        "81": {
+            "x": 125,
+            "y": 1012.5
+        },
+        "82": {
+            "x": 250,
+            "y": 1000
+        },
+        "83": {
+            "x": 375,
+            "y": 1012.5
+        },
+        "84": {
+            "x": 500,
+            "y": 1000
+        },
+        "85": {
+            "x": 625,
+            "y": 1012.5
+        },
+        "86": {
+            "x": 750,
+            "y": 1000
+        },
+        "87": {
+            "x": 875,
+            "y": 1012.5
+        },
+        "88": {
+            "x": 1000,
+            "y": 1000
+        },
+        "89": {
+            "x": 1125,
+            "y": 1012.5
+        },
+        "90": {
+            "x": 12.5,
+            "y": 1125
+        },
+        "91": {
+            "x": 137.5,
+            "y": 1137.5
+        },
+        "92": {
+            "x": 262.5,
+            "y": 1125
+        },
+        "93": {
+            "x": 387.5,
+            "y": 1137.5
+        },
+        "94": {
+            "x": 512.5,
+            "y": 1125
+        },
+        "95": {
+            "x": 637.5,
+            "y": 1137.5
+        },
+        "96": {
+            "x": 762.5,
+            "y": 1125
+        },
+        "97": {
+            "x": 887.5,
+            "y": 1137.5
+        },
+        "98": {
+            "x": 1012.5,
+            "y": 1125
+        },
+        "99": {
+            "x": 1137.5,
+            "y": 1137.5
+        }
+    },
+    "node_colors": {
+        "0": "yellow",
+        "1": "yellow",
+        "2": "white",
+        "3": "white",
+        "4": "yellow",
+        "5": "white",
+        "6": "yellow",
+        "7": "white",
+        "8": "white",
+        "9": "white",
+        "10": "white",
+        "11": "white",
+        "12": "white",
+        "13": "white",
+        "14": "white",
+        "15": "white",
+        "16": "white",
+        "17": "white",
+        "18": "white",
+        "19": "white",
+        "20": "white",
+        "21": "white",
+        "22": "white",
+        "23": "yellow",
+        "24": "white",
+        "25": "white",
+        "26": "white",
+        "27": "white",
+        "28": "white",
+        "29": "white",
+        "30": "white",
+        "31": "white",
+        "32": "white",
+        "33": "white",
+        "34": "white",
+        "35": "white",
+        "36": "white",
+        "37": "white",
+        "38": "white",
+        "39": "white",
+        "40": "yellow",
+        "41": "white",
+        "42": "white",
+        "43": "white",
+        "44": "white",
+        "45": "white",
+        "46": "yellow",
+        "47": "white",
+        "48": "white",
+        "49": "white",
+        "50": "white",
+        "51": "white",
+        "52": "white",
+        "53": "white",
+        "54": "yellow",
+        "55": "white",
+        "56": "white",
+        "57": "white",
+        "58": "yellow",
+        "59": "white",
+        "60": "white",
+        "61": "white",
+        "62": "white",
+        "63": "white",
+        "64": "white",
+        "65": "white",
+        "66": "yellow",
+        "67": "white",
+        "68": "white",
+        "69": "white",
+        "70": "white",
+        "71": "white",
+        "72": "white",
+        "73": "white",
+        "74": "yellow",
+        "75": "white",
+        "76": "white",
+        "77": "white",
+        "78": "yellow",
+        "79": "white",
+        "80": "white",
+        "81": "white",
+        "82": "white",
+        "83": "white",
+        "84": "white",
+        "85": "white",
+        "86": "white",
+        "87": "white",
+        "88": "white",
+        "89": "white",
+        "90": "white",
+        "91": "white",
+        "92": "white",
+        "93": "white",
+        "94": "white",
+        "95": "white",
+        "96": "white",
+        "97": "white",
+        "98": "white",
+        "99": "white"
+    },
+    "agent_assignment": {
+        "0": "SARSAAgent",
+        "1": "SARSAAgent",
+        "2": "MoodySARSAAgent",
+        "3": "MoodySARSAAgent",
+        "4": "SARSAAgent",
+        "5": "MoodySARSAAgent",
+        "6": "SARSAAgent",
+        "7": "MoodySARSAAgent",
+        "8": "MoodySARSAAgent",
+        "9": "MoodySARSAAgent",
+        "10": "MoodySARSAAgent",
+        "11": "MoodySARSAAgent",
+        "12": "MoodySARSAAgent",
+        "13": "MoodySARSAAgent",
+        "14": "MoodySARSAAgent",
+        "15": "MoodySARSAAgent",
+        "16": "MoodySARSAAgent",
+        "17": "MoodySARSAAgent",
+        "18": "MoodySARSAAgent",
+        "19": "MoodySARSAAgent",
+        "20": "MoodySARSAAgent",
+        "21": "MoodySARSAAgent",
+        "22": "MoodySARSAAgent",
+        "23": "SARSAAgent",
+        "24": "MoodySARSAAgent",
+        "25": "MoodySARSAAgent",
+        "26": "MoodySARSAAgent",
+        "27": "MoodySARSAAgent",
+        "28": "MoodySARSAAgent",
+        "29": "MoodySARSAAgent",
+        "30": "MoodySARSAAgent",
+        "31": "MoodySARSAAgent",
+        "32": "MoodySARSAAgent",
+        "33": "MoodySARSAAgent",
+        "34": "MoodySARSAAgent",
+        "35": "MoodySARSAAgent",
+        "36": "MoodySARSAAgent",
+        "37": "MoodySARSAAgent",
+        "38": "MoodySARSAAgent",
+        "39": "MoodySARSAAgent",
+        "40": "SARSAAgent",
+        "41": "MoodySARSAAgent",
+        "42": "MoodySARSAAgent",
+        "43": "MoodySARSAAgent",
+        "44": "MoodySARSAAgent",
+        "45": "MoodySARSAAgent",
+        "46": "SARSAAgent",
+        "47": "MoodySARSAAgent",
+        "48": "MoodySARSAAgent",
+        "49": "MoodySARSAAgent",
+        "50": "MoodySARSAAgent",
+        "51": "MoodySARSAAgent",
+        "52": "MoodySARSAAgent",
+        "53": "MoodySARSAAgent",
+        "54": "SARSAAgent",
+        "55": "MoodySARSAAgent",
+        "56": "MoodySARSAAgent",
+        "57": "MoodySARSAAgent",
+        "58": "SARSAAgent",
+        "59": "MoodySARSAAgent",
+        "60": "MoodySARSAAgent",
+        "61": "MoodySARSAAgent",
+        "62": "MoodySARSAAgent",
+        "63": "MoodySARSAAgent",
+        "64": "MoodySARSAAgent",
+        "65": "MoodySARSAAgent",
+        "66": "SARSAAgent",
+        "67": "MoodySARSAAgent",
+        "68": "MoodySARSAAgent",
+        "69": "MoodySARSAAgent",
+        "70": "MoodySARSAAgent",
+        "71": "MoodySARSAAgent",
+        "72": "MoodySARSAAgent",
+        "73": "MoodySARSAAgent",
+        "74": "SARSAAgent",
+        "75": "MoodySARSAAgent",
+        "76": "MoodySARSAAgent",
+        "77": "MoodySARSAAgent",
+        "78": "SARSAAgent",
+        "79": "MoodySARSAAgent",
+        "80": "MoodySARSAAgent",
+        "81": "MoodySARSAAgent",
+        "82": "MoodySARSAAgent",
+        "83": "MoodySARSAAgent",
+        "84": "MoodySARSAAgent",
+        "85": "MoodySARSAAgent",
+        "86": "MoodySARSAAgent",
+        "87": "MoodySARSAAgent",
+        "88": "MoodySARSAAgent",
+        "89": "MoodySARSAAgent",
+        "90": "MoodySARSAAgent",
+        "91": "MoodySARSAAgent",
+        "92": "MoodySARSAAgent",
+        "93": "MoodySARSAAgent",
+        "94": "MoodySARSAAgent",
+        "95": "MoodySARSAAgent",
+        "96": "MoodySARSAAgent",
+        "97": "MoodySARSAAgent",
+        "98": "MoodySARSAAgent",
+        "99": "MoodySARSAAgent"
+    },
+    "num_games_per_pair": 50000,
+    "percent_reconnection": 0.2,
+    "max_connection_distance": 13750.0,
+    "forgiveness_mode": "WIPE",
+    "average_considered_betrayal": 2.5,
+    "SARSAAgent_params": {
+        "epsilon": 0.1,
+        "alpha": 0.1,
+        "gamma": 0.95
+    },
+    "MoodySARSAAgent_params": {
+        "epsilon": 0.1,
+        "alpha": 0.1,
+        "gamma": 0.95
+    }
+}

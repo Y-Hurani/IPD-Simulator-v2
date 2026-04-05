@@ -1,0 +1,87 @@
+{
+  "name": "dash-cytoscape",
+  "version": "1.0.2",
+  "description": "A Component Library for Dash aimed at facilitating network visualization in Python, wrapped around Cytoscape.js",
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/plotly/dash-cytoscape.git"
+  },
+  "bugs": {
+    "url": "https://github.com/plotly/dash-cytoscape/issues"
+  },
+  "homepage": "https://github.com/plotly/dash-cytoscape",
+  "main": "build/index.js",
+  "scripts": {
+    "lint.flake8": "flake8 --max-line-length=100 usage.py usage-advanced.py usage-elements.py usage-events.py usage-stylesheet.py demos tests",
+    "lint.pylint": "pylint usage.py usage-advanced.py usage-elements.py usage-events.py usage-stylesheet.py demos tests",
+    "lint.eslint": "eslint src",
+    "lint.prettier": "prettier --config .prettierrc src/**/*.js src/**/**/*.js --list-different",
+    "lint.black": "node -e \"if ((process.env.PYVERSION || 'python39') !== 'python36'){process.exit(1)} \" || black --check dash_cytoscape/ tests/ setup.py usage-advanced.py usage-elements.py usage-events.py usage-stylesheet.py usage.py",
+    "format.eslint": "eslint src --fix",
+    "format.prettier": "prettier --config .prettierrc --write src/**/*.js src/**/**/*.js",
+    "format.black": "black dash_cytoscape/ tests/ setup.py usage-advanced.py usage-elements.py usage-events.py usage-stylesheet.py usage.py",
+    "format": "npm run format.eslint && npm run format.prettier && npm run format.black",
+    "lint:js": "npm run lint.eslint && npm run lint.prettier",
+    "lint:python": "npm run lint.flake8 && npm run lint.pylint && npm run lint.black",
+    "lint:all": "npm run lint:python && npm run lint:js",
+    "build:js-dev": "webpack --mode development",
+    "build:js": "webpack --mode production",
+    "build:js-dev-extra": "webpack --config webpack.dev.extra.config.js",
+    "build:js-extra": "webpack --config webpack.prod.extra.config.js",
+    "build:js-all": "npm run build:js && npm run build:js-dev && npm run build:js-dev-extra && npm run build:js-extra",
+    "build:backends": "dash-generate-components ./src/lib/components dash_cytoscape --r-prefix 'cyto' --jl-prefix 'cyto' && black dash_cytoscape/",
+    "build:all": "npm run build:js-all && npm run build:backends",
+    "build:all-activated": "(. venv/bin/activate || venv\\scripts\\activate && npm run build:all)"
+  },
+  "author": "The Plotly Team <cytoscape@plotly.com>",
+  "author-email": "cytoscape@plotly.com",
+  "license": "MIT",
+  "dependencies": {
+    "@ungap/custom-elements": "^1.3.0",
+    "cytoscape-cola": "^2.5.1",
+    "cytoscape-context-menus": "^4.1.0",
+    "cytoscape-cose-bilkent": "^4.1.0",
+    "cytoscape-dagre": "^2.5.0",
+    "cytoscape-euler": "^1.2.2",
+    "cytoscape-fcose": "^2.2.0",
+    "cytoscape-klay": "^3.1.4",
+    "cytoscape-spread": "^3.0.0",
+    "cytoscape-svg": "0.4.0",
+    "lodash": "^4.17.21",
+    "ramda": "^0.29.1",
+    "react-cytoscapejs": "2.0.0",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.23.9",
+    "@babel/eslint-parser": "^7.23.9",
+    "@babel/preset-env": "^7.23.9",
+    "@babel/preset-react": "^7.23.3",
+    "babel-loader": "^9.1.3",
+    "copyfiles": "^2.4.1",
+    "css-loader": "^6.9.1",
+    "eslint": "^8.56.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-import": "^2.29.1",
+    "eslint-plugin-react": "^7.33.2",
+    "npm": "^10.4.0",
+    "prettier": "^3.2.4",
+    "react-docgen": "^5.3.0",
+    "style-loader": "^3.3.4",
+    "webpack": "^5.90.0",
+    "webpack-cli": "^5.1.4",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "peerDependencies": {
+    "webpack": "^5.90.0",
+    "webpack-cli": "^5.1.4"
+  },
+  "files": [
+    "/dash_cytoscape/*{.js,.map,.txt}"
+  ],
+  "engines": {
+    "node": ">=8.11.0",
+    "npm": ">=6.1.0"
+  }
+}
