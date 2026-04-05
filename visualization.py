@@ -21,7 +21,7 @@ import dash_bootstrap_components as dbc
 import dash_cytoscape as cyto
 import networkx as nx
 import plotly.graph_objects as go
-from dash import Input, Output, State, ALL, MATCH, ctx, dcc, html
+from dash import ClientsideFunction, Input, Output, State, ALL, MATCH, ctx, dcc, html
 
 from flask_server import get_server
 
@@ -189,6 +189,21 @@ class SimulationState:
         # Latest metrics series snapshot — written by sim thread, read by Dash
         self._metrics: dict = {}
         self._metrics_lock = threading.Lock()
+        # Version counters — incremented on each write so Dash can skip
+        # serialisation when nothing has changed since the last poll.
+        # CPython int assignment is atomic under the GIL — no lock needed.
+        self._graph_version: int = 0
+        self._metrics_version: int = 0
+        # Backpressure: _acked_version tracks the last version the Dash
+        # callback has successfully consumed. try_update() only bumps
+        # _graph_version when _acked_version has caught up, preventing the
+        # sim thread from queuing more updates than the server can send.
+        self._acked_version: int = 0
+        # Delta tracking — computed each update(), read by Dash callback
+        self._prev_colors: list | None = None    # colors from last update()
+        self._color_delta: dict = {}             # {str(node_id): color}
+        self._prev_edges: set | None = None      # frozenset of (a,b) tuples
+        self._edge_delta: dict = {"added": [], "removed": []}
 
     # ── Pause control (called from Dash callbacks) ─────────────────────────
 
@@ -214,18 +229,112 @@ class SimulationState:
 
     def update(self, colors: list, moods: list):
         """
-        Write new display data atomically.
-        The Dash interval callback reads colors/moods from the main thread
-        while the sim thread writes here — the lock prevents torn reads.
+        Write latest colors/moods and compute deltas. Always updates the
+        raw data so the sim stays current, but only signals the Dash
+        callback (by incrementing _graph_version) when the previous frame
+        has been acknowledged. This is the backpressure gate.
+
+        If the browser hasn't consumed the last frame yet:
+          - colors/moods are refreshed in place (sim stays current)
+          - deltas accumulate (the next send will cover all missed changes)
+          - _graph_version is NOT bumped → Dash sees no new version → no send
+
+        If the browser has consumed the last frame (_acked_version caught up):
+          - deltas are snapshotted and _graph_version is bumped → Dash sends
         """
+        current_edges = frozenset(
+            (min(a, b), max(a, b)) for a, b in self.graph.edges()
+        )
+
         with self._data_lock:
+            # ── Always update raw display data ────────────────────────────
             self.colors = colors
             self.moods  = moods
+
+            # ── Accumulate color delta since last acknowledged send ───────
+            # If prev_colors is None this is the very first update.
+            prev_c = self._prev_colors
+            if prev_c is None:
+                pending_color_delta = {str(i): c for i, c in enumerate(colors)}
+            else:
+                # Merge new changes into any existing pending delta so that
+                # skipped frames don't lose their changes.
+                pending_color_delta = dict(self._color_delta)
+                for i, c in enumerate(colors):
+                    if i >= len(prev_c) or c != prev_c[i]:
+                        pending_color_delta[str(i)] = c
+            self._color_delta = pending_color_delta
+            self._prev_colors = colors
+
+            # ── Accumulate edge delta since last acknowledged send ─────────
+            prev_e = self._prev_edges
+            if prev_e is None:
+                self._edge_delta = {
+                    "added":   [[a, b] for a, b in current_edges],
+                    "removed": [],
+                }
+            else:
+                # Edges that were added then removed between sends cancel out.
+                # We track the net change: what's new vs the last acked state.
+                prev_added   = frozenset(tuple(e) for e in self._edge_delta["added"])
+                prev_removed = frozenset(tuple(e) for e in self._edge_delta["removed"])
+                newly_added   = current_edges - prev_e
+                newly_removed = prev_e - current_edges
+                net_added   = (prev_added   | newly_added)   - newly_removed
+                net_removed = (prev_removed | newly_removed) - newly_added
+                self._edge_delta = {
+                    "added":   [list(e) for e in net_added],
+                    "removed": [list(e) for e in net_removed],
+                }
+            self._prev_edges = current_edges
+
+            # ── Backpressure gate ─────────────────────────────────────────
+            # Only signal Dash if the previous frame was acknowledged.
+            # _graph_version and _acked_version are ints → atomic reads/writes
+            # under CPython's GIL so no lock needed for the comparison.
+            ready_to_signal = (self._acked_version == self._graph_version)
+
+        if ready_to_signal:
+            self._graph_version += 1  # signal Dash: new frame ready
+
+    def acknowledge(self, version: int):
+        """
+        Called by the Dash callback after successfully reading and sending
+        a delta. Releases the backpressure gate so the sim thread can signal
+        the next frame. Also resets the accumulated deltas since the browser
+        now has a fresh baseline.
+        """
+        with self._data_lock:
+            self._acked_version = version
+            # Reset deltas — next update() will diff from current state
+            self._color_delta = {}
+            self._edge_delta  = {"added": [], "removed": []}
 
     def read(self) -> tuple[list, list]:
         """Read colors and moods atomically."""
         with self._data_lock:
             return list(self.colors), list(self.moods)
+
+    def read_delta(self) -> tuple[dict, dict, list, list]:
+        """
+        Read both deltas and supporting data atomically.
+
+        Returns:
+          color_delta : {str(node_id): color} — only changed nodes
+          edge_delta  : {"added": [[a,b],...], "removed": [[a,b],...]}
+          moods       : full moods list (needed for label rendering)
+          full_colors : full colors list (needed only for first render)
+        """
+        with self._data_lock:
+            return (
+                dict(self._color_delta),
+                {
+                    "added":   list(self._edge_delta["added"]),
+                    "removed": list(self._edge_delta["removed"]),
+                },
+                list(self.moods),
+                list(self.colors),
+            )
 
     def update_iteration(self, i: int):
         """Called from the sim thread each reconstruction event."""
@@ -235,6 +344,7 @@ class SimulationState:
         """Called from the sim thread after each tracker snapshot."""
         with self._metrics_lock:
             self._metrics = series
+        self._metrics_version += 1  # atomic int write
 
     def read_metrics(self) -> dict:
         """Called from the Dash interval callback."""
@@ -260,6 +370,30 @@ class SimTabLayout:
                     "marginBottom": "8px", "fontWeight": "400"}
     _TOOLBAR_H   = "46px"
     _LEFT_W      = "220px"
+
+    def _adaptive_interval_ms(self) -> int:
+        """
+        Estimate a sensible Dash polling interval based on the expected
+        serialisation cost of one graph update frame.
+
+        Larger sims produce bigger delta payloads (more nodes to diff,
+        more edges to track) so we give the server more breathing room
+        between polls. Clamped between 500ms (small/fast sims) and
+        4000ms (very large sims).
+
+        Formula:
+          base = 500ms
+          node cost  ≈ 50 bytes each (id, label, color, position, classes)
+          edge cost  ≈ 30 bytes each (source, target)
+          extra_ms   = estimated_bytes // 1000
+          interval   = clamp(base + extra_ms, 500, 4000)
+        """
+        cfg       = self.state.config
+        n_nodes   = cfg.get("num_nodes",  100)
+        n_edges   = cfg.get("num_edges",  50)
+        estimated = n_nodes * 50 + n_edges * 30
+        interval  = min(4000, max(500, 500 + estimated // 1000))
+        return interval
 
     def _param_row(self, label: str, value) -> html.Div:
         return html.Div([
@@ -357,13 +491,17 @@ class SimTabLayout:
             self._plot_card("MoodySARSA Mood",
                             {"type": "plot-mood",          "sim": sid}),
 
-            # Stores live here so they exist regardless of sidebar state
-            dcc.Store(id={"type": "metrics-store", "sim": sid}, data={}),
-            dcc.Store(id={"type": "color-store",   "sim": sid},
-                      data=self.state.colors),
-            dcc.Store(id={"type": "mood-store",    "sim": sid}, data=[]),
+            # Stores live here so they exist regardless of sidebar state.
+            dcc.Store(id={"type": "metrics-store",         "sim": sid}, data={}),
+            dcc.Store(id={"type": "graph-version-store",   "sim": sid}, data=-1),
+            dcc.Store(id={"type": "metrics-version-store", "sim": sid}, data=-1),
+            # Delta store: holds {node_id: color} for changed nodes only,
+            # or the full elements list on first render / topology change.
+            # Keys: "type" = "full" or "delta", "payload" = data.
+            dcc.Store(id={"type": "graph-delta-store", "sim": sid},
+                      data={"type": "none", "payload": {}}),
             dcc.Interval(id={"type": "sim-interval", "sim": sid},
-                         interval=500, n_intervals=0),
+                         interval=self._adaptive_interval_ms(), n_intervals=0),
 
         ], style={
             "width": self._LEFT_W,
@@ -525,8 +663,7 @@ class SimulationApp:
     def _register_callbacks(self):
         self._cb_detect_new_sims()
         self._cb_show_hide_tabs()
-        self._cb_sync_stores()
-        self._cb_update_graphs()
+        self._cb_sync_and_render()   # replaces _cb_sync_stores + _cb_update_graphs
         self._cb_update_iteration()
         self._cb_pause_buttons()
         self._cb_restart_buttons()
@@ -588,9 +725,7 @@ class SimulationApp:
 
     def _cb_show_hide_tabs(self):
         """
-        Clientside callback: reads active-tab-store and toggles display on
-        every sim wrapper div and the config div — pure JS, zero server
-        round-trip, fires after the DOM has been updated with new divs.
+        Clientside callbacks for tab visibility and graph patch application.
         """
         @self.app.callback(
             Output("config-tab-content", "style"),
@@ -599,73 +734,97 @@ class SimulationApp:
         def toggle_config(active_tab):
             return {"display": "block" if active_tab == CONFIG_TAB_VALUE else "none"}
 
-        # Clientside JS: fires on every tab change (user click or new sim).
-        # Reads main-tabs directly so there is exactly one output owner for
-        # active-tab-store. Shows the matching sim-div-*, hides all others.
+        # Tab visibility: named function from assets/clientside.js
+        # Using ClientsideFunction avoids inline-string registration issues
+        # with MATCH pattern callbacks.
         self.app.clientside_callback(
-            """
-            function(activeTab) {
-                var simDivs = document.querySelectorAll('[id^="sim-div-"]');
-                simDivs.forEach(function(div) {
-                    var sid = div.id.replace('sim-div-', '');
-                    div.style.display = (activeTab === 'sim-' + sid) ? 'block' : 'none';
-                });
-                return activeTab;
-            }
-            """,
+            ClientsideFunction(namespace="ipd_sim", function_name="toggleSimTabs"),
             Output("active-tab-store", "data"),
             Input("main-tabs", "value"),
+        )
+
+        # Graph patch application: named function from assets/clientside.js
+        # "full" packet → replaces all elements (first render / topology change)
+        # "delta" packet → patches only changed nodes in-browser (O(changed) payload)
+        self.app.clientside_callback(
+            ClientsideFunction(namespace="ipd_sim", function_name="applyGraphPatch"),
+            Output({"type": "cytoscape",        "sim": MATCH}, "elements"),
+            Output({"type": "cytoscape",        "sim": MATCH}, "zoom"),
+            Output({"type": "cytoscape",        "sim": MATCH}, "pan"),
+            Input({"type": "graph-delta-store", "sim": MATCH}, "data"),
+            State({"type": "cytoscape",         "sim": MATCH}, "elements"),
+            State({"type": "cytoscape",         "sim": MATCH}, "zoom"),
+            State({"type": "cytoscape",         "sim": MATCH}, "pan"),
         )
 
     def _register_sim_visibility(self, sid: str):
         # No longer needed — clientside callback handles all sim divs.
         pass
 
-    def _cb_sync_stores(self):
+    def _cb_sync_and_render(self):
         """
-        Each sim's interval pumps its state into its own stores.
-        Returns no_update when paused so the graph stops refreshing
-        and the pause button label is never reset.
+        Server side of the delta-encoded graph update pipeline.
+
+        On each 500ms tick:
+          1. Version check — if _graph_version unchanged, return no_update.
+             Zero bytes cross the wire, zero work done.
+          2. Read delta: {node_id: new_color} for only changed nodes,
+             plus moods list and current edge count.
+          3. Topology change detection:
+             - If last_version == -1 (first render) OR edge count changed:
+               Build full Cytoscape elements list and send as a "full" packet.
+               This is O(N+E) but only happens on initial render and when the
+               network structure changes (reconstruction events).
+             - Otherwise: send a "delta" packet containing only changed nodes.
+               This is O(changed_nodes), typically much smaller than O(N).
+          4. The graph-delta-store receives the packet. A clientside callback
+             (registered in _cb_show_hide_tabs) applies it in the browser —
+             for deltas, it mutates only the changed node data objects in the
+             existing Cytoscape elements array, avoiding a full React re-render.
         """
         @self.app.callback(
-            Output({"type": "color-store", "sim": MATCH}, "data"),
-            Output({"type": "mood-store",  "sim": MATCH}, "data"),
-            Input({"type": "sim-interval", "sim": MATCH}, "n_intervals"),
-            State({"type": "sim-interval", "sim": MATCH}, "id"),
+            Output({"type": "graph-delta-store",   "sim": MATCH}, "data"),
+            Output({"type": "graph-version-store", "sim": MATCH}, "data"),
+            Input({"type": "sim-interval",         "sim": MATCH}, "n_intervals"),
+            State({"type": "sim-interval",         "sim": MATCH}, "id"),
+            State({"type": "graph-version-store",  "sim": MATCH}, "data"),
         )
-        def sync(_, interval_id):
-            sid = interval_id["sim"]
+        def sync_and_render(_, interval_id, last_version):
+            sid   = interval_id["sim"]
             state = self._find_state(sid)
             if state is None or state.paused:
                 return dash.no_update, dash.no_update
-            # Use atomic read so we never return a half-written list
-            colors, moods = state.read()
-            return colors, moods
+            current_version = state._graph_version
+            if current_version == last_version:
+                return dash.no_update, dash.no_update
 
-    def _cb_update_graphs(self):
-        """Each sim's stores trigger a re-render of its own Cytoscape graph."""
-        @self.app.callback(
-            Output({"type": "cytoscape", "sim": MATCH}, "elements"),
-            Output({"type": "cytoscape", "sim": MATCH}, "zoom"),
-            Output({"type": "cytoscape", "sim": MATCH}, "pan"),
-            Input({"type": "color-store", "sim": MATCH}, "data"),
-            Input({"type": "mood-store",  "sim": MATCH}, "data"),
-            State({"type": "cytoscape",   "sim": MATCH}, "zoom"),
-            State({"type": "cytoscape",   "sim": MATCH}, "pan"),
-            State({"type": "color-store", "sim": MATCH}, "id"),
-        )
-        def update_graph(colors, moods, zoom, pan, store_id):
-            if not colors:
-                return dash.no_update, zoom, pan
-            sid = store_id["sim"]
-            state = self._find_state(sid)
-            if state is None:
-                return dash.no_update, zoom, pan
-            elements = CytoscapeRenderer.elements(
-                state.graph, colors, state.dimensions,
-                moods=moods, positions=state.positions,
-            )
-            return elements, zoom, pan
+            color_delta, edge_delta, moods, full_colors = state.read_delta()
+
+            if last_version == -1:
+                # First render only — send complete elements list so the
+                # browser has a baseline to patch against from this point on.
+                elements = CytoscapeRenderer.elements(
+                    state.graph, full_colors, state.dimensions,
+                    moods=moods, positions=state.positions,
+                )
+                packet = {"type": "full", "payload": elements}
+            else:
+                # Every subsequent update uses deltas for both nodes and edges.
+                # edge_delta["added"] / ["removed"] contain only the edges that
+                # actually changed this reconstruction event — typically a small
+                # fraction of the total edge count even at high degree.
+                packet = {
+                    "type":          "delta",
+                    "payload":       color_delta,
+                    "moods":         moods,
+                    "edges_added":   edge_delta["added"],
+                    "edges_removed": edge_delta["removed"],
+                }
+
+            # Acknowledge this version — releases the backpressure gate so
+            # the sim thread can write the next frame. Also resets deltas.
+            state.acknowledge(current_version)
+            return packet, current_version
 
     def _cb_update_iteration(self):
         """Update the iteration counter display on each interval tick."""
@@ -735,24 +894,30 @@ class SimulationApp:
 
     def _cb_sync_metrics(self):
         """
-        Pump the latest metrics series from SimulationState into the per-sim
-        metrics-store on the same 500ms interval used for color/mood.
-        Returns no_update when paused so plots freeze cleanly.
+        Checks _metrics_version before touching the metrics dict at all.
+        Metrics are updated far less frequently than graph data (every ri*10
+        iterations vs every ri), so most polls will hit the version guard
+        and return no_update with essentially zero cost.
         """
         @self.app.callback(
-            Output({"type": "metrics-store", "sim": MATCH}, "data"),
-            Input({"type": "sim-interval",   "sim": MATCH}, "n_intervals"),
-            State({"type": "sim-interval",   "sim": MATCH}, "id"),
+            Output({"type": "metrics-store",          "sim": MATCH}, "data"),
+            Output({"type": "metrics-version-store",  "sim": MATCH}, "data"),
+            Input({"type": "sim-interval",            "sim": MATCH}, "n_intervals"),
+            State({"type": "sim-interval",            "sim": MATCH}, "id"),
+            State({"type": "metrics-version-store",   "sim": MATCH}, "data"),
         )
-        def sync_metrics(_, interval_id):
+        def sync_metrics(_, interval_id, last_version):
             sid   = interval_id["sim"]
             state = self._find_state(sid)
             if state is None or state.paused:
-                return dash.no_update
+                return dash.no_update, dash.no_update
+            current_version = state._metrics_version
+            if current_version == last_version:
+                return dash.no_update, dash.no_update
             metrics = state.read_metrics()
             if not metrics:
-                return dash.no_update
-            return metrics
+                return dash.no_update, dash.no_update
+            return metrics, current_version
 
     def _cb_update_plots(self):
         """

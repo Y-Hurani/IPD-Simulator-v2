@@ -422,9 +422,10 @@ class Simulation:
             if (i + 1) % (ri * 100) == 1:
                 self.env.reset()
                 self.forgiveness.trigger()
+                print(f"[Sim {self.state.sim_id}] Reset at iteration {i + 1}")
 
             if (i + 1) % ri == 0:
-                print(f"[Sim {self.state.sim_id}] Reconstruction at iteration {i + 1}")
+                # print(f"[Sim {self.state.sim_id}] Reconstruction at iteration {i + 1}")
                 self.reconstructor.reconstruct(i)
                 colors, moods = colors_and_moods(self.agents)
                 self.state.update(colors, moods)
