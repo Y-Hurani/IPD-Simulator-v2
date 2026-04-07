@@ -204,6 +204,12 @@ class SimulationState:
         self._color_delta: dict = {}             # {str(node_id): color}
         self._prev_edges: set | None = None      # frozenset of (a,b) tuples
         self._edge_delta: dict = {"added": [], "removed": []}
+        # Set to False by update_visibility when the tab is hidden.
+        # update() skips all delta computation (including the expensive edge
+        # frozenset) when False — sim thread still runs, just doesn't diff.
+        # When tab becomes visible, reset to True and _prev_edges = None so
+        # the next send triggers a clean full repaint with no stale deltas.
+        self.rendering_active: bool = False
 
     # ── Pause control (called from Dash callbacks) ─────────────────────────
 
@@ -240,16 +246,42 @@ class SimulationState:
           - _graph_version is NOT bumped → Dash sees no new version → no send
 
         If the browser has consumed the last frame (_acked_version caught up):
-          - deltas are snapshotted and _graph_version is bumped → Dash sends
-        """
-        current_edges = frozenset(
-            (min(a, b), max(a, b)) for a, b in self.graph.edges()
-        )
+          - accumulated deltas are reset (browser now has a fresh baseline)
+          - new deltas are computed from the current state
+          - _graph_version is bumped → Dash sends
 
+        Delta reset happens HERE, not in acknowledge(). acknowledge() only
+        records the ack version. This ensures that if the browser is slow or
+        backgrounded and never applies a frame, all intermediate topology and
+        colour changes keep accumulating and are included in the next send.
+        Previously, resetting in acknowledge() caused changes between send-time
+        and render-time to be silently dropped.
+
+        When rendering_active is False (tab hidden), all delta computation is
+        skipped entirely — including the O(E) edge frozenset which is the most
+        expensive part with large fully-connected graphs. Colors/moods are still
+        stored so the sim stays current; the sim thread is never blocked.
+        """
         with self._data_lock:
             # ── Always update raw display data ────────────────────────────
             self.colors = colors
             self.moods  = moods
+
+            # ── Skip all delta work when tab is not visible ───────────────
+            # The O(E) edge frozenset and color diff are pure waste when no
+            # render will happen. _prev_edges is left as-is (or None) so when
+            # rendering_active becomes True again the full repaint path fires.
+            if not self.rendering_active:
+                return
+
+            # ── Backpressure gate check ───────────────────────────────────
+            ready_to_signal = (self._acked_version == self._graph_version)
+
+            if ready_to_signal:
+                # Previous frame was acknowledged — reset accumulated deltas
+                # so the new diff starts from the browser's current baseline.
+                self._color_delta = {}
+                self._edge_delta  = {"added": [], "removed": []}
 
             # ── Accumulate color delta since last acknowledged send ───────
             # If prev_colors is None this is the very first update.
@@ -266,7 +298,13 @@ class SimulationState:
             self._color_delta = pending_color_delta
             self._prev_colors = colors
 
-            # ── Accumulate edge delta since last acknowledged send ─────────
+            # ── Edge delta: only compute frozenset when actively rendering ─
+            # With infinite connection distance and 100 nodes the graph can
+            # have thousands of edges. frozenset(graph.edges()) every 10
+            # iterations is the most expensive single operation in this method.
+            current_edges = frozenset(
+                (min(a, b), max(a, b)) for a, b in self.graph.edges()
+            )
             prev_e = self._prev_edges
             if prev_e is None:
                 self._edge_delta = {
@@ -288,51 +326,55 @@ class SimulationState:
                 }
             self._prev_edges = current_edges
 
-            # ── Backpressure gate ─────────────────────────────────────────
-            # Only signal Dash if the previous frame was acknowledged.
-            # _graph_version and _acked_version are ints → atomic reads/writes
-            # under CPython's GIL so no lock needed for the comparison.
-            ready_to_signal = (self._acked_version == self._graph_version)
-
         if ready_to_signal:
             self._graph_version += 1  # signal Dash: new frame ready
 
     def acknowledge(self, version: int):
         """
-        Called by the Dash callback after successfully reading and sending
-        a delta. Releases the backpressure gate so the sim thread can signal
-        the next frame. Also resets the accumulated deltas since the browser
-        now has a fresh baseline.
+        Called by the Dash callback after reading and dispatching a delta.
+        Releases the backpressure gate so the sim thread can signal the next
+        frame on its following update() call.
+
+        Delta reset is intentionally NOT done here. It happens at the start
+        of the next update() write cycle once this ack is seen. This prevents
+        a race where the browser is slow to render: if we reset deltas here
+        (at send time) and the browser never applies the frame, the next packet
+        would diff from a phantom baseline and lose intermediate changes.
         """
+        # _acked_version write is atomic under CPython's GIL — no lock needed,
+        # but we take the lock for consistency with the read in update().
         with self._data_lock:
             self._acked_version = version
-            # Reset deltas — next update() will diff from current state
-            self._color_delta = {}
-            self._edge_delta  = {"added": [], "removed": []}
 
     def read(self) -> tuple[list, list]:
         """Read colors and moods atomically."""
         with self._data_lock:
             return list(self.colors), list(self.moods)
 
-    def read_delta(self) -> tuple[dict, dict, list, list]:
+    def read_delta(self) -> tuple[dict, dict, dict, list]:
         """
         Read both deltas and supporting data atomically.
 
         Returns:
           color_delta : {str(node_id): color} — only changed nodes
           edge_delta  : {"added": [[a,b],...], "removed": [[a,b],...]}
-          moods       : full moods list (needed for label rendering)
-          full_colors : full colors list (needed only for first render)
+          moods_by_id : {str(node_id): mood} — full mood map for label rendering
+          full_colors : full colors list — needed only for first (full) render
+
+        moods_by_id is a dict so the caller can cheaply extract only the moods
+        for nodes present in color_delta without iterating the whole list.
+        The contract is that get_latest_series() always returns list copies so
+        the sim thread cannot mutate data the Dash thread is reading.
         """
         with self._data_lock:
+            moods_by_id = {str(i): m for i, m in enumerate(self.moods)}
             return (
                 dict(self._color_delta),
                 {
                     "added":   list(self._edge_delta["added"]),
                     "removed": list(self._edge_delta["removed"]),
                 },
-                list(self.moods),
+                moods_by_id,
                 list(self.colors),
             )
 
@@ -347,9 +389,20 @@ class SimulationState:
         self._metrics_version += 1  # atomic int write
 
     def read_metrics(self) -> dict:
-        """Called from the Dash interval callback."""
+        """
+        Called from the Dash interval callback.
+
+        Returns a deep copy of the metrics snapshot so the Dash thread can
+        safely iterate nested lists without racing against the sim thread's
+        AgentTracker appending new values to the same list objects.
+
+        Contract: get_latest_series() in AgentTracker must always return a
+        fresh snapshot (list copies, not references to live _series buffers).
+        deepcopy here enforces isolation regardless of tracker internals.
+        """
+        import copy
         with self._metrics_lock:
-            return dict(self._metrics)
+            return copy.deepcopy(self._metrics)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -495,6 +548,18 @@ class SimTabLayout:
             dcc.Store(id={"type": "metrics-store",         "sim": sid}, data={}),
             dcc.Store(id={"type": "graph-version-store",   "sim": sid}, data=-1),
             dcc.Store(id={"type": "metrics-version-store", "sim": sid}, data=-1),
+            # Tracks whether the four sidebar charts have been initialised with
+            # their full figure skeleton. Once True, updates use extendData
+            # (append-only, constant payload) instead of rebuilding figures.
+            dcc.Store(id={"type": "plot-init-store",       "sim": sid}, data=False),
+            # True when this sim's tab is the active tab. Written by the
+            # toggleSimTabs clientside callback on every tab change.
+            # sync_and_render and sync_metrics both read this store and return
+            # no_update immediately when False — the simulation keeps running
+            # in its thread but zero rendering work is done for hidden tabs.
+            # When the tab becomes visible again, graph-version-store is reset
+            # to -1 so the next tick sends a full repaint of current state.
+            dcc.Store(id={"type": "tab-visible-store",     "sim": sid}, data=False),
             # Delta store: holds {node_id: color} for changed nodes only,
             # or the full elements list on first render / topology change.
             # Keys: "type" = "full" or "delta", "payload" = data.
@@ -594,9 +659,16 @@ class SimulationApp:
 
     def __init__(self, server, config_layout: html.Div):
         self._config_layout = config_layout
-        self._simulations: list[SimulationState] = []
+        # Keyed by sim_id string — O(1) lookup in _find_state instead of O(N)
+        # linear scan. Insertion order is preserved (Python 3.7+) so iteration
+        # over values() still yields sims in launch order.
+        self._simulations: dict[str, SimulationState] = {}
         self._sim_counter = 0
         self._lock = threading.Lock()
+        # Tracks which sim IDs were finished as of the last tab-bar rebuild.
+        # The tab-bar is only re-serialised when this set changes or a new sim
+        # is added — not on every shell-interval tick.
+        self._finished_sids: frozenset[str] = frozenset()
 
         self.app = dash.Dash(
             __name__,
@@ -629,7 +701,7 @@ class SimulationApp:
             state = SimulationState(sid, graph, dimensions, positions,
                                     initial_colors, sim_name=sim_name,
                                     config=config)
-            self._simulations.append(state)
+            self._simulations[sid] = state   # O(1) insert, O(1) lookup
         self._register_sim_visibility(sid)
         return state
 
@@ -664,7 +736,9 @@ class SimulationApp:
         self._cb_detect_new_sims()
         self._cb_show_hide_tabs()
         self._cb_sync_and_render()   # replaces _cb_sync_stores + _cb_update_graphs
-        self._cb_update_iteration()
+        # _cb_update_iteration removed — iteration is now embedded in the delta
+        # packet and applied by the clientside applyGraphPatch function, saving
+        # one full server round-trip per interval tick per running simulation.
         self._cb_pause_buttons()
         self._cb_restart_buttons()
         self._cb_sync_metrics()
@@ -689,21 +763,31 @@ class SimulationApp:
         def detect_new_sims(_, sim_divs, known_count, active_tab):
             with self._lock:
                 total = len(self._simulations)
-                all_states = list(self._simulations)
+                all_states = list(self._simulations.values())
 
-            # Tab bar — always correct order, cheap to rebuild (labels only)
-            tab_children = [dcc.Tab(label="⚙ Configuration", value=CONFIG_TAB_VALUE)]
-            for state in all_states:
-                display_name = state.sim_name if state.sim_name else f"Sim {state.sim_id}"
-                indicator = " ✓" if state.finished else ""
-                tab_children.append(
-                    dcc.Tab(
-                        label=f"▶ {display_name}{indicator}",
-                        value=f"sim-{state.sim_id}",
+            # ── Tab bar: only rebuild when something actually changed ──────
+            # Check whether the set of finished sims has changed since the
+            # last rebuild. If count is unchanged AND no new sim has finished,
+            # return no_update for the tab bar — zero bytes cross the wire.
+            current_finished = frozenset(s.sim_id for s in all_states if s.finished)
+            tabs_changed = (total != known_count) or (current_finished != self._finished_sids)
+
+            if tabs_changed:
+                self._finished_sids = current_finished
+                tab_children = [dcc.Tab(label="⚙ Configuration", value=CONFIG_TAB_VALUE)]
+                for state in all_states:
+                    display_name = state.sim_name if state.sim_name else f"Sim {state.sim_id}"
+                    indicator = " ✓" if state.finished else ""
+                    tab_children.append(
+                        dcc.Tab(
+                            label=f"▶ {display_name}{indicator}",
+                            value=f"sim-{state.sim_id}",
+                        )
                     )
-                )
+            else:
+                tab_children = dash.no_update
 
-            if total <= known_count:
+            if total <= known_count and not tabs_changed:
                 return tab_children, dash.no_update, known_count, active_tab
 
             # Append divs for NEW sims only — existing divs are untouched
@@ -726,26 +810,76 @@ class SimulationApp:
     def _cb_show_hide_tabs(self):
         """
         Clientside callbacks for tab visibility and graph patch application.
+        Also registers a server callback that gates rendering for hidden tabs.
         """
-        @self.app.callback(
+        # Config div visibility — pure CSS toggle, no Python needed.
+        # Runs entirely in the browser: zero network traffic, instant response.
+        self.app.clientside_callback(
+            """
+            function(activeTab) {
+                return activeTab === '%s' ? {display: 'block'} : {display: 'none'};
+            }
+            """ % CONFIG_TAB_VALUE,
             Output("config-tab-content", "style"),
             Input("main-tabs", "value"),
         )
-        def toggle_config(active_tab):
-            return {"display": "block" if active_tab == CONFIG_TAB_VALUE else "none"}
 
         # Tab visibility: named function from assets/clientside.js
-        # Using ClientsideFunction avoids inline-string registration issues
-        # with MATCH pattern callbacks.
         self.app.clientside_callback(
             ClientsideFunction(namespace="ipd_sim", function_name="toggleSimTabs"),
             Output("active-tab-store", "data"),
             Input("main-tabs", "value"),
         )
 
+        # Visibility gate: write tab-visible-store for each sim based on the
+        # active tab. When a sim becomes hidden, also reset graph-version-store
+        # to -1 so the next time it becomes visible the first tick sends a full
+        # repaint — the browser's Cytoscape canvas is stale after being hidden.
+        @self.app.callback(
+            Output({"type": "tab-visible-store",   "sim": MATCH}, "data"),
+            Output({"type": "graph-version-store", "sim": MATCH}, "data",
+                   allow_duplicate=True),
+            Input("main-tabs", "value"),
+            State({"type": "tab-visible-store",    "sim": MATCH}, "id"),
+            prevent_initial_call=True,
+        )
+        def update_visibility(active_tab, store_id):
+            sid     = store_id["sim"]
+            visible = (active_tab == f"sim-{sid}")
+            state   = self._find_state(sid)
+            if state is not None:
+                if visible:
+                    # Becoming visible: activate delta tracking and reset
+                    # _prev_edges to None so the next update() call triggers
+                    # a clean full-edge snapshot rather than diffing against
+                    # a stale pre-hidden baseline.
+                    with state._data_lock:
+                        state.rendering_active = True
+                        state._prev_edges      = None
+                        state._prev_colors     = None
+                        state._color_delta     = {}
+                        state._edge_delta      = {"added": [], "removed": []}
+                else:
+                    # Becoming hidden: deactivate delta tracking so update()
+                    # skips all O(E) frozenset and diff work for this sim.
+                    with state._data_lock:
+                        state.rendering_active = False
+            # When becoming hidden: reset graph-version-store to -1 so the
+            # next visible tick forces a full packet instead of a stale delta.
+            # When becoming visible: leave graph-version-store alone — the
+            # interval callback reads the real current version itself.
+            version_reset = -1 if not visible else dash.no_update
+            return visible, version_reset
+
         # Graph patch application: named function from assets/clientside.js
         # "full" packet → replaces all elements (first render / topology change)
         # "delta" packet → patches only changed nodes in-browser (O(changed) payload)
+        # Both packet types carry an "iteration" int that applyGraphPatch writes
+        # to the iteration-display element, replacing the old _cb_update_iteration
+        # server callback entirely.
+        # The iteration-display id is passed as the last State so applyGraphPatch
+        # can call document.getElementById() directly — no DOM walking, no
+        # cross-contamination between simultaneously running simulations.
         self.app.clientside_callback(
             ClientsideFunction(namespace="ipd_sim", function_name="applyGraphPatch"),
             Output({"type": "cytoscape",        "sim": MATCH}, "elements"),
@@ -755,6 +889,7 @@ class SimulationApp:
             State({"type": "cytoscape",         "sim": MATCH}, "elements"),
             State({"type": "cytoscape",         "sim": MATCH}, "zoom"),
             State({"type": "cytoscape",         "sim": MATCH}, "pan"),
+            State({"type": "iteration-display", "sim": MATCH}, "id"),
         )
 
     def _register_sim_visibility(self, sid: str):
@@ -765,22 +900,18 @@ class SimulationApp:
         """
         Server side of the delta-encoded graph update pipeline.
 
-        On each 500ms tick:
+        On each interval tick:
+          0. Visibility gate — if tab-visible-store is False this sim is not
+             on screen. Return no_update immediately. The simulation thread
+             keeps running; no packet is assembled or sent. The interval keeps
+             ticking so it wakes instantly when the tab is reopened.
+             When the tab becomes visible again, update_visibility resets
+             graph-version-store to -1, so the next tick here sends a full
+             repaint of current state via the last_version == -1 path.
           1. Version check — if _graph_version unchanged, return no_update.
-             Zero bytes cross the wire, zero work done.
-          2. Read delta: {node_id: new_color} for only changed nodes,
-             plus moods list and current edge count.
-          3. Topology change detection:
-             - If last_version == -1 (first render) OR edge count changed:
-               Build full Cytoscape elements list and send as a "full" packet.
-               This is O(N+E) but only happens on initial render and when the
-               network structure changes (reconstruction events).
-             - Otherwise: send a "delta" packet containing only changed nodes.
-               This is O(changed_nodes), typically much smaller than O(N).
-          4. The graph-delta-store receives the packet. A clientside callback
-             (registered in _cb_show_hide_tabs) applies it in the browser —
-             for deltas, it mutates only the changed node data objects in the
-             existing Cytoscape elements array, avoiding a full React re-render.
+          2. Read delta: {node_id: new_color} for only changed nodes.
+          3. Topology change detection: full packet on first render, delta after.
+          4. Clientside applyGraphPatch applies the packet in the browser.
         """
         @self.app.callback(
             Output({"type": "graph-delta-store",   "sim": MATCH}, "data"),
@@ -788,8 +919,12 @@ class SimulationApp:
             Input({"type": "sim-interval",         "sim": MATCH}, "n_intervals"),
             State({"type": "sim-interval",         "sim": MATCH}, "id"),
             State({"type": "graph-version-store",  "sim": MATCH}, "data"),
+            State({"type": "tab-visible-store",    "sim": MATCH}, "data"),
         )
-        def sync_and_render(_, interval_id, last_version):
+        def sync_and_render(_, interval_id, last_version, is_visible):
+            # ── Visibility gate ───────────────────────────────────────────
+            if not is_visible:
+                return dash.no_update, dash.no_update
             sid   = interval_id["sim"]
             state = self._find_state(sid)
             if state is None or state.paused:
@@ -798,25 +933,32 @@ class SimulationApp:
             if current_version == last_version:
                 return dash.no_update, dash.no_update
 
-            color_delta, edge_delta, moods, full_colors = state.read_delta()
+            color_delta, edge_delta, moods_by_id, full_colors = state.read_delta()
 
             if last_version == -1:
                 # First render only — send complete elements list so the
                 # browser has a baseline to patch against from this point on.
+                # full moods list is reconstructed from moods_by_id here.
+                full_moods = [moods_by_id.get(str(i)) for i in range(len(full_colors))]
                 elements = CytoscapeRenderer.elements(
                     state.graph, full_colors, state.dimensions,
-                    moods=moods, positions=state.positions,
+                    moods=full_moods, positions=state.positions,
                 )
-                packet = {"type": "full", "payload": elements}
+                packet = {"type": "full", "payload": elements,
+                          "iteration": state.iteration}
             else:
                 # Every subsequent update uses deltas for both nodes and edges.
-                # edge_delta["added"] / ["removed"] contain only the edges that
-                # actually changed this reconstruction event — typically a small
-                # fraction of the total edge count even at high degree.
+                # mood_delta contains only the mood values for nodes that are
+                # already in color_delta — no need to send all N moods every tick.
+                # The clientside patch function reads mood from mood_delta[id]
+                # rather than indexing into the full list.
+                mood_delta = {nid: moods_by_id[nid]
+                              for nid in color_delta if nid in moods_by_id}
                 packet = {
                     "type":          "delta",
                     "payload":       color_delta,
-                    "moods":         moods,
+                    "mood_delta":    mood_delta,
+                    "iteration":     state.iteration,
                     "edges_added":   edge_delta["added"],
                     "edges_removed": edge_delta["removed"],
                 }
@@ -825,20 +967,6 @@ class SimulationApp:
             # the sim thread can write the next frame. Also resets deltas.
             state.acknowledge(current_version)
             return packet, current_version
-
-    def _cb_update_iteration(self):
-        """Update the iteration counter display on each interval tick."""
-        @self.app.callback(
-            Output({"type": "iteration-display", "sim": MATCH}, "children"),
-            Input({"type": "sim-interval", "sim": MATCH}, "n_intervals"),
-            State({"type": "sim-interval", "sim": MATCH}, "id"),
-        )
-        def update_iter(_, interval_id):
-            sid   = interval_id["sim"]
-            state = self._find_state(sid)
-            if state is None:
-                return dash.no_update
-            return f"{state.iteration:,}"
 
     def _cb_pause_buttons(self):
         """Pause/Resume button for each sim tab."""
@@ -894,10 +1022,12 @@ class SimulationApp:
 
     def _cb_sync_metrics(self):
         """
-        Checks _metrics_version before touching the metrics dict at all.
-        Metrics are updated far less frequently than graph data (every ri*10
-        iterations vs every ri), so most polls will hit the version guard
-        and return no_update with essentially zero cost.
+        Checks tab visibility first, then _metrics_version before touching
+        the metrics dict at all. Hidden tabs return no_update immediately —
+        the sim thread keeps appending to its series buffers, and the full
+        up-to-date metrics are sent as one batch the first time the tab is
+        opened (metrics-version-store diverges while hidden, so it always
+        sends on the next visible tick).
         """
         @self.app.callback(
             Output({"type": "metrics-store",          "sim": MATCH}, "data"),
@@ -905,8 +1035,12 @@ class SimulationApp:
             Input({"type": "sim-interval",            "sim": MATCH}, "n_intervals"),
             State({"type": "sim-interval",            "sim": MATCH}, "id"),
             State({"type": "metrics-version-store",   "sim": MATCH}, "data"),
+            State({"type": "tab-visible-store",       "sim": MATCH}, "data"),
         )
-        def sync_metrics(_, interval_id, last_version):
+        def sync_metrics(_, interval_id, last_version, is_visible):
+            # ── Visibility gate ───────────────────────────────────────────
+            if not is_visible:
+                return dash.no_update, dash.no_update
             sid   = interval_id["sim"]
             state = self._find_state(sid)
             if state is None or state.paused:
@@ -921,39 +1055,122 @@ class SimulationApp:
 
     def _cb_update_plots(self):
         """
-        Rebuild all four sidebar plots whenever the metrics-store updates.
-        One callback handles all four figures to avoid four separate server
-        round-trips per interval tick.
+        Update the four sidebar charts incrementally using extendData.
+
+        On first data arrival the figures are built once with their full
+        skeleton (axes, layout, empty traces in the right order/colours).
+        Every subsequent update appends only the newest [x, y] point per
+        trace via the extendData property — a constant-size payload
+        regardless of how many rounds the simulation has run.
+
+        Previously this rebuilt four complete go.Figure objects containing
+        the entire time-series on every metrics update, with payload size
+        growing linearly without bound over the simulation lifetime.
         """
+        # Trace order must match _CLASS_COLORS iteration order — fixed here
+        # so extendData indices are stable.
+        _CLASSES  = ["MoodySARSA", "SARSA", "TFT", "WSLS"]
+        _N_TRACES = len(_CLASSES)
+
+        def _initial_figure(y_title: str = "", y_range: list | None = None) -> go.Figure:
+            """Build the figure skeleton with empty traces in correct order."""
+            fig = go.Figure()
+            for cls in _CLASSES:
+                fig.add_trace(go.Scatter(
+                    x=[], y=[],
+                    mode="lines",
+                    name=cls,
+                    line=dict(color=_CLASS_COLORS.get(cls, "#999"), width=1.5),
+                ))
+            layout = dict(**_PLOT_LAYOUT)
+            if y_range:
+                layout["yaxis"] = {**_PLOT_LAYOUT["yaxis"], "range": y_range}
+            if y_title:
+                layout["yaxis"] = {**layout.get("yaxis", {}), "title": y_title}
+            fig.update_layout(**layout)
+            return fig
+
+        def _extend_payload(metrics: dict, metric: str) -> tuple[dict, list]:
+            """
+            Build an extendData payload for one chart.
+            Returns ({x: [...], y: [...]}, trace_indices) where each list has
+            one element per trace — the single newest data point.
+            """
+            rounds  = metrics.get("rounds", [])
+            classes = metrics.get(metric, {})
+            if not rounds:
+                return {}, []
+            latest_x = rounds[-1]
+            xs = [latest_x] * _N_TRACES
+            ys = [classes.get(cls, [None])[-1] if classes.get(cls) else None
+                  for cls in _CLASSES]
+            return (
+                {"x": [[x] for x in xs], "y": [[y] for y in ys]},
+                list(range(_N_TRACES)),
+            )
+
         @self.app.callback(
-            Output({"type": "plot-score",       "sim": MATCH}, "figure"),
-            Output({"type": "plot-connectivity","sim": MATCH}, "figure"),
-            Output({"type": "plot-cooperation", "sim": MATCH}, "figure"),
-            Output({"type": "plot-mood",        "sim": MATCH}, "figure"),
-            Output({"type": "sidebar-waiting",  "sim": MATCH}, "style"),
-            Input({"type": "metrics-store",     "sim": MATCH}, "data"),
+            Output({"type": "plot-score",        "sim": MATCH}, "figure"),
+            Output({"type": "plot-connectivity", "sim": MATCH}, "figure"),
+            Output({"type": "plot-cooperation",  "sim": MATCH}, "figure"),
+            Output({"type": "plot-mood",         "sim": MATCH}, "figure"),
+            Output({"type": "plot-score",        "sim": MATCH}, "extendData"),
+            Output({"type": "plot-connectivity", "sim": MATCH}, "extendData"),
+            Output({"type": "plot-cooperation",  "sim": MATCH}, "extendData"),
+            Output({"type": "plot-mood",         "sim": MATCH}, "extendData"),
+            Output({"type": "sidebar-waiting",   "sim": MATCH}, "style"),
+            Output({"type": "plot-init-store",   "sim": MATCH}, "data"),
+            Input({"type": "metrics-store",      "sim": MATCH}, "data"),
+            State({"type": "plot-init-store",    "sim": MATCH}, "data"),
         )
-        def update_plots(metrics):
+        def update_plots(metrics, already_initialised):
+            no_data_style = {"fontSize": "0.78rem", "color": "#868e96",
+                             "fontStyle": "italic", "marginBottom": "8px"}
+            hidden        = {"display": "none"}
+            no_ext        = dash.no_update  # placeholder for extendData outputs
+
             if not metrics or not metrics.get("rounds"):
-                no_data_style = {"fontSize": "0.78rem", "color": "#868e96",
-                                 "fontStyle": "italic", "marginBottom": "8px"}
                 return (
                     _empty_figure(), _empty_figure(),
                     _empty_figure(), _empty_figure(),
-                    no_data_style,
+                    no_ext, no_ext, no_ext, no_ext,
+                    no_data_style, False,
                 )
 
-            hidden = {"display": "none"}
+            if not already_initialised:
+                # First data arrival — build figure skeletons and populate all
+                # existing points so the charts are immediately correct.
+                # After this, only extendData is used (figure outputs = no_update).
+                rounds   = metrics["rounds"]
+                fig_score = _initial_figure(y_title="Avg payoff")
+                fig_conn  = _initial_figure(y_title="Norm. degree", y_range=[0, 1])
+                fig_coop  = _initial_figure(y_title="Coop. rate",   y_range=[0, 1])
+                fig_mood  = _initial_figure(y_title="Mood (0–100)", y_range=[0, 100])
+                for i, cls in enumerate(_CLASSES):
+                    for fig, metric in [
+                        (fig_score, "score"), (fig_conn, "connectivity"),
+                        (fig_coop, "cooperation"), (fig_mood, "mood"),
+                    ]:
+                        vals = metrics.get(metric, {}).get(cls, [])
+                        fig.data[i].x = rounds
+                        fig.data[i].y = vals
+                return (
+                    fig_score, fig_conn, fig_coop, fig_mood,
+                    no_ext, no_ext, no_ext, no_ext,
+                    hidden, True,
+                )
+
+            # Already initialised — append only the newest point via extendData.
+            # Payload is constant size: 4 traces × 1 point × 4 charts.
+            # No go.Figure objects are constructed at all.
+            ext_score = _extend_payload(metrics, "score")
+            ext_conn  = _extend_payload(metrics, "connectivity")
+            ext_coop  = _extend_payload(metrics, "cooperation")
+            ext_mood  = _extend_payload(metrics, "mood")
             return (
-                _build_line_figure(metrics, "score",
-                                   y_title="Avg payoff"),
-                _build_line_figure(metrics, "connectivity",
-                                   y_title="Norm. degree", y_range=[0, 1]),
-                _build_line_figure(metrics, "cooperation",
-                                   y_title="Coop. rate",   y_range=[0, 1]),
-                _build_line_figure(metrics, "mood",
-                                   y_title="Mood (0–100)", y_range=[0, 100]),
-                hidden,
+                dash.no_update, dash.no_update, dash.no_update, dash.no_update,
+                ext_score, ext_conn, ext_coop, ext_mood,
+                hidden, True,
             )
 
     # _cb_sidebar removed — analysis panel is now a permanent left panel
@@ -962,11 +1179,9 @@ class SimulationApp:
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _find_state(self, sid: str) -> SimulationState | None:
+        # O(1) dict lookup — previously an O(N) linear scan under a lock.
         with self._lock:
-            for s in self._simulations:
-                if s.sim_id == sid:
-                    return s
-        return None
+            return self._simulations.get(sid)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

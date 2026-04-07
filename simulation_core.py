@@ -403,37 +403,161 @@ class Simulation:
         Blocking loop – run inside a daemon thread.
         Calls state.wait_if_paused() each iteration so the pause button
         blocks the thread cleanly without busy-waiting.
+
+        GIL note
+        --------
+        Python's GIL means only one thread runs bytecode at a time. Without
+        voluntary yields, a tight simulation loop starves Flask/Dash request
+        threads, freezing the GUI. time.sleep(0) releases the GIL for zero
+        real time on every iteration, giving Flask workers a guaranteed slot.
+
+        Adaptive render throttle
+        ------------------------
+        All simulation logic (game play, reconstruction, metrics tracking,
+        forgiveness reset) runs at the fixed RECONSTRUCTION_INTERVAL defined
+        by the research design — this never changes.
+
+        LoadThrottle only controls how often state.update() is called, i.e.
+        how often the current graph colours are pushed to the browser.
+        When Dash falls behind consuming render frames, the throttle skips
+        renders (every 5th, 10th, or 50th reconstruction instead of every one)
+        until the server recovers. The simulation itself is unaffected.
         """
-        ri = self.RECONSTRUCTION_INTERVAL
+        ri       = self.RECONSTRUCTION_INTERVAL  # fixed by research design
+        throttle = LoadThrottle()
 
         for i in range(self.num_games):
+            # Yield the GIL so Flask/Dash request threads can always run.
+            time.sleep(0)
+
             self.state.wait_if_paused()
 
             for edge in self.graph.edges():
                 self.game_runner.play(self.agents[edge[0]], self.agents[edge[1]])
 
+            # ── Metrics tracking: every ri*10 iterations (unchanged) ──────
             if (i + 1) % (ri * 10) == 1:
                 current_degrees = dict(self.graph.degree())
                 self.tracker.track_types_metrics(current_degrees)
-                # Push latest series snapshot into SimulationState so the
-                # Dash interval callback can read it without touching AgentTracker
                 self.state.update_metrics(self.tracker.get_latest_series())
 
+            # ── Forgiveness reset: every ri*100 iterations (unchanged) ────
             if (i + 1) % (ri * 100) == 1:
                 self.env.reset()
                 self.forgiveness.trigger()
                 print(f"[Sim {self.state.sim_id}] Reset at iteration {i + 1}")
 
+            # ── Reconstruction: every ri iterations (unchanged) ───────────
             if (i + 1) % ri == 0:
-                # print(f"[Sim {self.state.sim_id}] Reconstruction at iteration {i + 1}")
                 self.reconstructor.reconstruct(i)
-                colors, moods = colors_and_moods(self.agents)
-                self.state.update(colors, moods)
                 self.state.update_iteration(i + 1)
+
+                # Render throttle: only push colours to the browser when the
+                # throttle says to. Reconstruction always happens; only the
+                # visualisation is skipped under load.
+                if throttle.should_render():
+                    colors, moods = colors_and_moods(self.agents)
+                    self.state.update(colors, moods)
+
+                # Assess lag and adjust render cadence for the next cycle.
+                throttle.step(self.state)
                 time.sleep(0.05)
 
         self.state.finished = True
         print(f"[Sim {self.state.sim_id}] Finished. CSVs saved to stats/")
+
+
+# ---------------------------------------------------------------------------
+# Load throttle
+# ---------------------------------------------------------------------------
+
+class LoadThrottle:
+    """
+    Adaptive render-throttle controller.
+
+    The simulation's reconstruction interval stays fixed at
+    Simulation.RECONSTRUCTION_INTERVAL (every 10 game iterations) — this is
+    defined by the research design and must not be altered.
+
+    What this throttle controls is how often the result of a reconstruction is
+    *rendered*: how often state.update() is called to push colours/moods to
+    the browser. render_every is expressed in number of reconstructions, so:
+
+      render_every=1  → render after every reconstruction  (every 10 games)
+      render_every=5  → render after every 5th reconstruction (every 50 games)
+      render_every=10 → render after every 10th              (every 100 games)
+      render_every=50 → render after every 50th              (every 500 games)
+
+    Load signal
+    -----------
+    SimulationState._graph_version increments each time the sim thread
+    produces a new render frame. _acked_version increments each time Dash has
+    consumed one. The lag = _graph_version - _acked_version. When lag > 0
+    the server is producing frames faster than it can send them; 0 means it
+    is keeping up.
+
+    Backoff schedule
+    ----------------
+    render_every levels: 1 → 5 → 10 → 50
+    (equivalent game cadence: every 10 → 50 → 100 → 500 games)
+    Step up  (skip more renders) when lag > 0 for LAG_PATIENCE seconds.
+    Step down (render more often) when lag == 0 for RECOVERY_PATIENCE seconds.
+    Steps are one level at a time in each direction.
+    """
+
+    LEVELS            = [1, 5, 10, 50]   # in units of reconstructions
+    LAG_PATIENCE      = 2.0              # seconds of sustained lag before step up
+    RECOVERY_PATIENCE = 5.0              # seconds of zero lag before step down
+
+    def __init__(self):
+        self._level_idx  = 0
+        self._lag_since  = None
+        self._ok_since   = None
+        self._recon_count = 0   # how many reconstructions have happened
+
+    @property
+    def render_every(self) -> int:
+        """Number of reconstructions between each state.update() call."""
+        return self.LEVELS[self._level_idx]
+
+    def should_render(self) -> bool:
+        """
+        Called after every reconstruction. Returns True when state.update()
+        should be called this cycle, False to skip rendering.
+        Increments the internal reconstruction counter.
+        """
+        self._recon_count += 1
+        return (self._recon_count % self.render_every) == 0
+
+    def step(self, state) -> None:
+        """
+        Called after every reconstruction (whether rendered or not).
+        Reads the lag signal and adjusts the render level.
+        The state attributes are plain ints — atomic under CPython's GIL.
+        """
+        now = time.monotonic()
+        lag = state._graph_version - state._acked_version
+
+        if lag > 0:
+            self._ok_since = None
+            if self._lag_since is None:
+                self._lag_since = now
+            elif now - self._lag_since >= self.LAG_PATIENCE:
+                if self._level_idx < len(self.LEVELS) - 1:
+                    self._level_idx += 1
+                    equiv = self.render_every * Simulation.RECONSTRUCTION_INTERVAL
+                    print(f"[Throttle] Render lag — rendering every {equiv} games")
+                self._lag_since = now
+        else:
+            self._lag_since = None
+            if self._ok_since is None:
+                self._ok_since = now
+            elif now - self._ok_since >= self.RECOVERY_PATIENCE:
+                if self._level_idx > 0:
+                    self._level_idx -= 1
+                    equiv = self.render_every * Simulation.RECONSTRUCTION_INTERVAL
+                    print(f"[Throttle] Load cleared — rendering every {equiv} games")
+                self._ok_since = now
 
 
 # ---------------------------------------------------------------------------
@@ -544,3 +668,4 @@ _pool = SimulationThreadPool()
 
 def get_pool() -> SimulationThreadPool:
     return _pool
+
