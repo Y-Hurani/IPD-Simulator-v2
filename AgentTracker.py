@@ -76,6 +76,17 @@ class AgentTracker:
           # MoodySARSA-only average mood (0–100)
           "mood": { "MoodySARSA": [...] },
         }
+
+        SNAPSHOT CONTRACT
+        -----------------
+        Every list in the returned dict MUST be a fresh copy (list(...)), never
+        a direct reference to a live _series buffer. This method is called from
+        the sim thread and the result is passed to SimulationState.update_metrics(),
+        which hands it to the Dash polling thread via read_metrics(). If any
+        returned list were a live reference, the Dash thread could iterate it
+        while this thread appends to it — a silent data race. The deepcopy in
+        read_metrics() is a second line of defence; list() copies here are the
+        primary guarantee. Do NOT change list(s["..."]) to s["..."].
         """
         s = self._series
         rounds = list(self._rounds)
